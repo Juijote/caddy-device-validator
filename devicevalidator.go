@@ -153,6 +153,7 @@ func (dv *DeviceValidator) isSuspiciousDevice(r *http.Request) bool {
 }
 
 func (dv *DeviceValidator) serveValidationPage(w http.ResponseWriter, r *http.Request) {
+	token := dv.generateToken(r.RemoteAddr)
 	message := dv.CustomMessage
 	if message == "" {
 		message = "异常请求"
@@ -164,28 +165,24 @@ func (dv *DeviceValidator) serveValidationPage(w http.ResponseWriter, r *http.Re
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>设备验证</title>
-<style>
-:root {
-  --primary-color: rgba(128, 255, 128, 0.8);
-  --background-start: #11581E;
-  --background-end: #041607;
-  --overlay-color: rgba(32, 128, 32, 0.8);
-  --font-size-base: 16px;
-  --font-size-large: 2rem;
-  --spacing-base: 1rem;
-}
+<!-- 预加载字体文件 -->
+<link rel="preconnect" href="https://static.zeoseven.com" crossorigin />
+<link rel="stylesheet" href="https://static.zeoseven.com/zsft/4/main/result.css" />
 
-html { min-height: 100%; font-family: "JinzisheTongyuan", system-ui, -apple-system, sans-serif; font-size: var(--font-size-base); }
+<style>
 body {
-  box-sizing: border-box;
-  height: 100vh;
   margin: 0;
+  height: 100vh;
+  font-family: "JinzisheTongyuan", system-ui, -apple-system, BlinkMacSystemFont, sans-serif;
   background-color: #000;
-  background-image: radial-gradient(var(--background-start), var(--background-end));
-  font-size: var(--font-size-large);
-  color: var(--primary-color);
-  text-shadow: 0 0 1ex #33ff33, 0 0 2px rgba(255,255,255,0.8);
+  background-image: radial-gradient(#11581E, #041607);
+  color: #80ff80;
+  text-shadow: 0 0 2px #33ff33, 0 0 1px #33ff33;
+  display: flex;
+  align-items: center;
+  justify-content: center;
   overflow: hidden;
+  font-size: 1.5rem;
 }
 
 .noise {
@@ -204,18 +201,36 @@ body {
 }
 .overlay::before {
   content: ""; position: absolute; display: block; inset: 0;
-  background-image: linear-gradient(0deg, transparent 0%, var(--overlay-color) 2%, var(--overlay-color) 3%, transparent 100%);
+  background-image: linear-gradient(0deg, transparent 0%, rgba(32,128,32,0.8) 2%, rgba(32,128,32,0.8) 3%, transparent 100%);
   background-repeat: no-repeat;
   animation: scan 7.5s linear infinite;
 }
 
-.terminal { position: relative; max-width: 800px; margin: 0 auto; padding: calc(var(--spacing-base)*4); }
-.line { opacity: 0; white-space: pre-wrap; }
-.cursor { display: inline-block; width: 0.8ch; background: var(--primary-color); animation: blink 1s steps(2, start) infinite; }
+.terminal {
+  position: relative;
+  max-width: 800px;
+  margin: 0 auto;
+  padding: 40px;
+}
 
-@keyframes scan { 0% { background-position: 0 -100vh; } 35%, 100% { background-position: 0 100vh; } }
+.line {
+  opacity: 0;
+  white-space: pre-wrap;
+  animation: fadein 0.5s forwards;
+}
+
+.cursor {
+  display: inline-block;
+  width: 0.8ch;
+  background: #80ff80;
+  animation: blink 1s steps(2,start) infinite;
+  vertical-align: bottom;
+}
+
+@keyframes scan { 0% { background-position: 0 -100vh; } 35%,100% { background-position: 0 100vh; } }
 @keyframes noise { 0% { transform: translate(0,0); } 100% { transform: translate(1px,1px); } }
-@keyframes blink { 0%, 50% { background: var(--primary-color); } 50.1%, 100% { background: transparent; } }
+@keyframes blink { 0%,50% { background: #80ff80; } 50.1%,100% { background: transparent; } }
+@keyframes fadein { from { opacity: 0; text-shadow: none; } to { opacity: 1; text-shadow: 0 0 2px #33ff33, 0 0 1px #33ff33; } }
 
 @media (prefers-reduced-motion: reduce) { .noise, .overlay::before, .cursor { animation: none; } }
 </style>
@@ -227,7 +242,7 @@ body {
 <main class="terminal" id="terminal"></main>
 
 <script>
-(function(){
+(function() {
   const message = "%s";
   const terminal = document.getElementById("terminal");
   const lines = message.split("\\n");
@@ -247,7 +262,7 @@ body {
       if(j < line.length) {
         cursor.insertAdjacentText("beforebegin", line[j]);
         j++;
-        setTimeout(typeChar, 50);
+        setTimeout(typeChar, 40 + Math.random()*40); // 打字随机延迟
       } else {
         cursor.remove();
         span.style.opacity = 1;
@@ -260,6 +275,22 @@ body {
   function typeNext() {
     if(i < lines.length) {
       typeLine(lines[i], () => { i++; typeNext(); });
+    } else {
+      // 保留原 JS 验证逻辑
+      let isSuspicious = false;
+      const info = { ua: navigator.userAgent, hasTouch: 'ontouchstart' in window || navigator.maxTouchPoints > 0, maxTouchPoints: navigator.maxTouchPoints || 0 };
+
+      if (/Mobile|Android|iPhone|iPad/i.test(info.ua) && info.maxTouchPoints <= 1) isSuspicious = true;
+      if (navigator.webdriver === true) isSuspicious = true;
+
+      if (isSuspicious) {
+        document.body.innerHTML = '<div class="container"><h2>异常请求</h2><p>%s</p></div>';
+      } else {
+        document.cookie = 'device_verified=1; path=/; max-age=300; SameSite=Lax';
+        const url = new URL(window.location.href);
+        url.searchParams.set("_vt", "%s");
+        setTimeout(() => { window.location.href = url.toString(); }, 500);
+      }
     }
   }
 
@@ -267,7 +298,7 @@ body {
 })();
 </script>
 </body>
-</html>`, message)
+</html>`, message, message, token)
 
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.WriteHeader(http.StatusOK)
