@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"net/http"
+	"net/url"
 	"regexp"
 	"strings"
 	"sync"
@@ -100,26 +101,62 @@ func (dv *DeviceValidator) ServeHTTP(w http.ResponseWriter, r *http.Request, nex
 		return next.ServeHTTP(w, r)
 	}
 
-	// 检查是否有有效的验证 token
+	// === 优先级 1: 检查 token(最高优先级) ===
 	token := r.URL.Query().Get("_vt")
-	if token != "" && dv.isValidToken(token, r.RemoteAddr) {
-		// Token 有效,继续处理请求
-		return next.ServeHTTP(w, r)
-	}
-
-	// 如果开启强制验证模式,所有请求都需要验证
-	if dv.ForceVerification {
-		cookie, err := r.Cookie("device_verified")
-		if err != nil || cookie.Value != "1" {
-			dv.logger.Info("force verification mode",
+	if token != "" {
+		if dv.isValidToken(token, r.RemoteAddr) {
+			dv.logger.Info("✅ valid token, access granted",
+				zap.String("token", token[:8]+"..."),
 				zap.String("path", r.URL.Path))
-			dv.serveValidationPage(w, r)
-			return nil
+			
+			// 删除 token,清理 URL
+			newURL := r.URL
+			q := newURL.Query()
+			q.Del("_vt")
+			newURL.RawQuery = q.Encode()
+			
+			// 设置 cookie 后重定向到干净的 URL
+			http.SetCookie(w, &http.Cookie{
+				Name:     "device_verified",
+				Value:    "1",
+				Path:     "/",
+				MaxAge:   dv.TokenExpiry,
+				HttpOnly: false,
+				SameSite: http.SameSiteLaxMode,
+			})
+			
+			// 如果 URL 改变了(去掉了 _vt),重定向
+			if newURL.String() != r.URL.String() {
+				http.Redirect(w, r, newURL.String(), http.StatusFound)
+				return nil
+			}
+			
+			// 继续处理请求
+			return next.ServeHTTP(w, r)
+		} else {
+			dv.logger.Warn("❌ invalid or expired token",
+				zap.String("token", token[:8]+"..."))
+			// token 无效,继续验证流程
 		}
 	}
 
-	// 检查设备是否可疑
+	// === 优先级 2: 检查 cookie ===
+	verifiedCookie, err := r.Cookie("device_verified")
+	if err == nil && verifiedCookie.Value == "1" {
+		dv.logger.Debug("✅ verified cookie found, access granted",
+			zap.String("path", r.URL.Path))
+		return next.ServeHTTP(w, r)
+	}
+
+	// === 优先级 3: 检查是否需要验证 ===
+	if dv.ForceVerification {
+		dv.logger.Info("🔍 force verification mode, showing validation page")
+		dv.serveValidationPage(w, r)
+		return nil
+	}
+
 	if dv.isSuspiciousDevice(r) {
+		dv.logger.Info("🔍 suspicious device detected, showing validation page")
 		dv.serveValidationPage(w, r)
 		return nil
 	}
@@ -135,23 +172,22 @@ func (dv *DeviceValidator) isSuspiciousDevice(r *http.Request) bool {
 	// 检查是否为移动设备 UA
 	isMobileUA := dv.mobileRegex.MatchString(userAgent)
 
-	// 检查是否已经通过验证
+	// === 重要:首先检查是否已经通过验证 ===
 	verifiedCookie, hasVerified := r.Cookie("device_verified")
 	if hasVerified == nil && verifiedCookie.Value == "1" {
-		// 已经验证过,直接放行
+		dv.logger.Debug("device already verified, skipping checks",
+			zap.String("ua", userAgent))
 		return false
 	}
 
-	// 检查是否为无头浏览器特征(优先级最高)
+	// === 无头浏览器检测(优先级最高,基于 UA) ===
 	if dv.CheckHeadless {
-		// HeadlessChrome UA 检测
 		if strings.Contains(userAgent, "HeadlessChrome") {
 			dv.logger.Info("detected HeadlessChrome UA",
 				zap.String("ua", userAgent))
 			return true
 		}
 
-		// PhantomJS UA 检测
 		if strings.Contains(userAgent, "PhantomJS") || strings.Contains(userAgent, "Phantom") {
 			dv.logger.Info("detected PhantomJS UA",
 				zap.String("ua", userAgent))
@@ -159,16 +195,16 @@ func (dv *DeviceValidator) isSuspiciousDevice(r *http.Request) bool {
 		}
 	}
 
-	// 如果是移动设备 UA 且开启了伪造检测,需要 JS 验证
+	// === 移动设备检测 ===
 	if dv.CheckFakeMobile && isMobileUA {
-		dv.logger.Info("mobile UA detected, need verification",
+		dv.logger.Info("mobile UA detected, showing verification page",
 			zap.String("ua", userAgent))
 		return true
 	}
 
-	// 如果开启了 DevTools 检测(非移动设备),需要 JS 验证
+	// === DevTools 检测(仅针对桌面浏览器) ===
 	if dv.CheckDevTools && !isMobileUA {
-		dv.logger.Info("devtools check enabled, need verification",
+		dv.logger.Info("desktop browser, showing verification page for devtools check",
 			zap.String("ua", userAgent))
 		return true
 	}
@@ -479,6 +515,10 @@ func (dv *DeviceValidator) generateToken(ip string) string {
 	}
 	dv.tokensLock.Unlock()
 
+	dv.logger.Debug("token generated",
+		zap.String("token", token[:8]+"..."),
+		zap.String("ip", ip))
+
 	return token
 }
 
@@ -489,17 +529,30 @@ func (dv *DeviceValidator) isValidToken(token, ip string) bool {
 
 	data, exists := dv.tokens[token]
 	if !exists {
+		dv.logger.Debug("token not found", zap.String("token", token[:8]+"..."))
 		return false
 	}
 
 	if time.Since(data.CreatedAt).Seconds() > float64(dv.TokenExpiry) {
+		dv.logger.Debug("token expired",
+			zap.String("token", token[:8]+"..."),
+			zap.Float64("age", time.Since(data.CreatedAt).Seconds()))
 		return false
 	}
 
 	tokenIP := strings.Split(data.IP, ":")[0]
 	requestIP := strings.Split(ip, ":")[0]
 
-	return data.Valid && tokenIP == requestIP
+	if tokenIP != requestIP {
+		dv.logger.Debug("token IP mismatch",
+			zap.String("token_ip", tokenIP),
+			zap.String("request_ip", requestIP))
+		return false
+	}
+
+	dv.logger.Debug("token validated successfully",
+		zap.String("token", token[:8]+"..."))
+	return data.Valid
 }
 
 // isExcludedPath 检查路径是否在排除列表中
