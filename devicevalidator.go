@@ -167,120 +167,105 @@ func (dv *DeviceValidator) serveValidationPage(w http.ResponseWriter, r *http.Re
 <style>
 :root {
   --primary-color: rgba(128, 255, 128, 0.8);
-  --text-shadow-color: rgba(51, 255, 51, 0.4);
   --background-start: #11581E;
   --background-end: #041607;
   --overlay-color: rgba(32, 128, 32, 0.8);
-  --animation-duration: 7.5s;
   --font-size-base: 16px;
   --font-size-large: 2rem;
   --spacing-base: 1rem;
 }
 
-html {
-  min-height: 100%;
-  font-family: "JinzisheTongyuan", system-ui, -apple-system, sans-serif;
-  font-size: var(--font-size-base);
-}
-
+html { min-height: 100%; font-family: "JinzisheTongyuan", system-ui, -apple-system, sans-serif; font-size: var(--font-size-base); }
 body {
   box-sizing: border-box;
   height: 100vh;
   margin: 0;
-  background-color: #000000;
+  background-color: #000;
   background-image: radial-gradient(var(--background-start), var(--background-end));
   font-size: var(--font-size-large);
   color: var(--primary-color);
-  text-shadow: 0 0 1ex #33ff33, 0 0 2px rgba(255, 255, 255, 0.8);
+  text-shadow: 0 0 1ex #33ff33, 0 0 2px rgba(255,255,255,0.8);
   overflow: hidden;
 }
 
 .noise {
-  position: fixed;
-  top: 0;
-  left: 0;
-  width: 100%;
-  height: 100%;
-  background: 
-    repeating-radial-gradient(#000 0 0.0001%, #fff 0 0.0002%) 50% 0/2500px 2500px,
-    repeating-conic-gradient(#000 0 0.0001%, #fff 0 0.0002%) 50% 50%/2500px 2500px;
+  position: fixed; top: 0; left: 0; width: 100%; height: 100%;
+  background: repeating-radial-gradient(#000 0 0.0001%, #fff 0 0.0002%) 50% 0/2500px 2500px,
+              repeating-conic-gradient(#000 0 0.0001%, #fff 0 0.0002%) 50% 50%/2500px 2500px;
   background-blend-mode: difference;
   animation: noise 0.2s infinite alternate;
-  opacity: 0.05;
-  pointer-events: none;
-  z-index: -1;
+  opacity: 0.05; pointer-events: none; z-index: -1;
 }
 
 .overlay {
-  pointer-events: none;
-  position: fixed;
-  width: 100%;
-  height: 100%;
-  background: repeating-linear-gradient(
-    180deg,
-    rgba(0, 0, 0, 0) 0,
-    rgba(0, 0, 0, 0.3) 50%,
-    rgba(0, 0, 0, 0) 100%
-  );
-  background-size: auto 4px;
-  z-index: 1;
+  pointer-events: none; position: fixed; width: 100%; height: 100%;
+  background: repeating-linear-gradient(180deg, rgba(0,0,0,0) 0, rgba(0,0,0,0.3) 50%, rgba(0,0,0,0) 100%);
+  background-size: auto 4px; z-index: 1;
 }
-
 .overlay::before {
-  content: "";
-  pointer-events: none;
-  position: absolute;
-  display: block;
-  inset: 0;
-  background-image: linear-gradient(
-    0deg,
-    transparent 0%,
-    var(--overlay-color) 2%,
-    var(--overlay-color) 3%,
-    transparent 100%
-  );
+  content: ""; position: absolute; display: block; inset: 0;
+  background-image: linear-gradient(0deg, transparent 0%, var(--overlay-color) 2%, var(--overlay-color) 3%, transparent 100%);
   background-repeat: no-repeat;
-  animation: scan var(--animation-duration) linear infinite;
+  animation: scan 7.5s linear infinite;
 }
 
-.terminal {
-  position: relative;
-  max-width: 800px;
-  margin: 0 auto;
-  padding: calc(var(--spacing-base) * 4);
-  text-align: center;
-}
+.terminal { position: relative; max-width: 800px; margin: 0 auto; padding: calc(var(--spacing-base)*4); }
+.line { opacity: 0; white-space: pre-wrap; }
+.cursor { display: inline-block; width: 0.8ch; background: var(--primary-color); animation: blink 1s steps(2, start) infinite; }
 
-.errorcode {
-  color: white;
-  font-size: calc(var(--font-size-large) * 1.5);
-  font-weight: bold;
-}
+@keyframes scan { 0% { background-position: 0 -100vh; } 35%, 100% { background-position: 0 100vh; } }
+@keyframes noise { 0% { transform: translate(0,0); } 100% { transform: translate(1px,1px); } }
+@keyframes blink { 0%, 50% { background: var(--primary-color); } 50.1%, 100% { background: transparent; } }
 
-@keyframes scan {
-  0% { background-position: 0 -100vh; }
-  35%, 100% { background-position: 0 100vh; }
-}
-
-@keyframes noise {
-  0% { transform: translate(0, 0); }
-  100% { transform: translate(1px, 1px); }
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .noise, .overlay::before { animation: none; }
-}
+@media (prefers-reduced-motion: reduce) { .noise, .overlay::before, .cursor { animation: none; } }
 </style>
 </head>
 <body>
-<div class="noise" aria-hidden="true"></div>
-<div class="overlay" aria-hidden="true"></div>
+<div class="noise"></div>
+<div class="overlay"></div>
 
-<main class="terminal">
-  <div class="error-container" role="alert" aria-live="polite">
-    <h1><span class="errorcode">%s</span></h1>
-  </div>
-</main>
+<main class="terminal" id="terminal"></main>
+
+<script>
+(function(){
+  const message = "%s";
+  const terminal = document.getElementById("terminal");
+  const lines = message.split("\\n");
+  let i = 0;
+
+  function typeLine(line, callback) {
+    let j = 0;
+    const span = document.createElement("div");
+    span.className = "line";
+    terminal.appendChild(span);
+
+    const cursor = document.createElement("span");
+    cursor.className = "cursor";
+    span.appendChild(cursor);
+
+    function typeChar() {
+      if(j < line.length) {
+        cursor.insertAdjacentText("beforebegin", line[j]);
+        j++;
+        setTimeout(typeChar, 50);
+      } else {
+        cursor.remove();
+        span.style.opacity = 1;
+        callback();
+      }
+    }
+    typeChar();
+  }
+
+  function typeNext() {
+    if(i < lines.length) {
+      typeLine(lines[i], () => { i++; typeNext(); });
+    }
+  }
+
+  typeNext();
+})();
+</script>
 </body>
 </html>`, message)
 
