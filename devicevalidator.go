@@ -81,43 +81,14 @@ func (dv *DeviceValidator) Provision(ctx caddy.Context) error {
 }
 
 func (dv *DeviceValidator) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddyhttp.Handler) error {
-	if !dv.Enable {
+	if !dv.Enable || dv.isExcludedPath(r.URL.Path) {
 		return next.ServeHTTP(w, r)
-	}
-
-	if dv.isExcludedPath(r.URL.Path) {
-		return next.ServeHTTP(w, r)
-	}
-
-	token := r.URL.Query().Get("_vt")
-	if token != "" {
-		if dv.isValidToken(token, r.RemoteAddr, r.Header.Get("User-Agent")) {
-			newURL := r.URL
-			q := newURL.Query()
-			q.Del("_vt")
-			newURL.RawQuery = q.Encode()
-
-			http.SetCookie(w, &http.Cookie{
-				Name:     "device_verified",
-				Value:    "1",
-				Path:     "/",
-				MaxAge:   dv.TokenExpiry,
-				HttpOnly: false,
-				SameSite: http.SameSiteLaxMode,
-			})
-
-			if newURL.String() != r.URL.String() {
-				http.Redirect(w, r, newURL.String(), http.StatusFound)
-				return nil
-			}
-			return next.ServeHTTP(w, r)
-		}
 	}
 
 	verifiedCookie, err := r.Cookie("device_verified")
-	if err == nil && verifiedCookie.Value == "1" {
-		// 强制再次校验 UA + IP
-		if dv.isValidCookie(r) {
+	if err == nil && verifiedCookie.Value != "" {
+		// cookie 存在，检查 UA/IP hash 是否匹配
+		if dv.isValidCookie(verifiedCookie.Value, r) {
 			return next.ServeHTTP(w, r)
 		}
 	}
@@ -130,39 +101,36 @@ func (dv *DeviceValidator) ServeHTTP(w http.ResponseWriter, r *http.Request, nex
 	return next.ServeHTTP(w, r)
 }
 
-// UA + IP 校验 cookie，防止 UA 被修改
-func (dv *DeviceValidator) isValidCookie(r *http.Request) bool {
-	cookie, _ := r.Cookie("device_verified")
-	if cookie == nil || cookie.Value != "1" {
+func (dv *DeviceValidator) isValidCookie(cookieValue string, r *http.Request) bool {
+	dv.tokensLock.RLock()
+	defer dv.tokensLock.RUnlock()
+	data, exists := dv.tokens[cookieValue]
+	if !exists || !data.Valid {
 		return false
 	}
-	// 这里简单通过 UA + IP 重新生成 hash 对比最近的 token
-	token := r.URL.Query().Get("_vt")
-	if token == "" {
+	if time.Since(data.CreatedAt).Seconds() > float64(dv.TokenExpiry) {
 		return false
 	}
-	return dv.isValidToken(token, r.RemoteAddr, r.Header.Get("User-Agent"))
+	if strings.Split(data.IP, ":")[0] != strings.Split(r.RemoteAddr, ":")[0] {
+		return false
+	}
+	uaHash := fmt.Sprintf("%x", sha256.Sum256([]byte(r.Header.Get("User-Agent"))))
+	if data.UAHash != uaHash {
+		return false
+	}
+	return true
 }
 
 func (dv *DeviceValidator) isSuspiciousDevice(r *http.Request) bool {
 	userAgent := r.Header.Get("User-Agent")
 	isMobileUA := dv.mobileRegex.MatchString(userAgent)
 
-	verifiedCookie, hasVerified := r.Cookie("device_verified")
-	if hasVerified == nil && verifiedCookie.Value == "1" {
-		return false
+	if dv.CheckHeadless && (strings.Contains(userAgent, "HeadlessChrome") || strings.Contains(userAgent, "PhantomJS")) {
+		return true
 	}
-
-	if dv.CheckHeadless {
-		if strings.Contains(userAgent, "HeadlessChrome") || strings.Contains(userAgent, "PhantomJS") {
-			return true
-		}
-	}
-
 	if dv.CheckFakeMobile && isMobileUA {
 		return true
 	}
-
 	return false
 }
 
@@ -176,87 +144,39 @@ func (dv *DeviceValidator) serveValidationPage(w http.ResponseWriter, r *http.Re
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>设备验证</title>
 <style>
-body {
-  margin: 0; height: 100vh;
-  font-family: system-ui, -apple-system, BlinkMacSystemFont, sans-serif;
-  background-color: #000;
-  background-image: radial-gradient(#11581E, #041607);
-  color: #80ff80;
-  text-shadow: 0 0 2px #33ff33, 0 0 1px #33ff33;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  overflow: hidden;
-  font-size: 1.5rem;
-}
-.noise {
-  position: fixed; top: 0; left: 0; width: 100%; height: 100%;
-  background: repeating-radial-gradient(#000 0 0.0001%, #fff 0 0.0002%) 50% 0/2000px 2000px,
-              repeating-conic-gradient(#000 0 0.0001%, #fff 0 0.0002%) 50% 50%/2000px 2000px;
-  background-blend-mode: difference;
-  animation: noise 0.3s infinite alternate;
-  opacity: 0.03; pointer-events: none; z-index: -1;
-}
-.overlay {
-  pointer-events: none; position: fixed; width: 100%; height: 100%;
-  background: repeating-linear-gradient(180deg, rgba(0,0,0,0) 0, rgba(0,0,0,0.3) 50%, rgba(0,0,0,0) 100%);
-  background-size: auto 3px; z-index: 1;
-}
-.overlay::before {
-  content: ""; position: absolute; inset: 0;
-  background-image: linear-gradient(0deg, transparent 0%, rgba(32,128,32,0.8) 2%, rgba(32,128,32,0.8) 3%, transparent 100%);
-  background-repeat: no-repeat;
-  animation: scan 5s linear infinite;
-}
-.terminal { position: relative; max-width: 600px; margin: 0 auto; padding: 20px; text-align: center; white-space: pre; }
-.cursor { display: inline-block; width: 0.8ch; background: #80ff80; animation: blink 1s steps(2,start) infinite; vertical-align: bottom; }
-@keyframes scan { 0% { background-position: 0 -100vh; } 100% { background-position: 0 100vh; } }
-@keyframes noise { 0% { transform: translate(0,0); } 100% { transform: translate(1px,1px); } }
-@keyframes blink { 0%,50% { background: #80ff80; } 50.1%,100% { background: transparent; } }
-@media (prefers-reduced-motion: reduce) { .noise, .overlay::before, .cursor { animation: none; } }
+/* CRT 风格样式保持不变 */
+body{margin:0;height:100vh;font-family:system-ui,-apple-system,BlinkMacSystemFont,sans-serif;background-color:#000;background-image:radial-gradient(#11581E,#041607);color:#80ff80;text-shadow:0 0 2px #33ff33,0 0 1px #33ff33;display:flex;align-items:center;justify-content:center;overflow:hidden;font-size:1.5rem;}
+.noise{position:fixed;top:0;left:0;width:100%;height:100%;background:repeating-radial-gradient(#000 0 0.0001%,#fff 0 0.0002%) 50% 0/2000px 2000px,repeating-conic-gradient(#000 0 0.0001%,#fff 0 0.0002%) 50% 50%/2000px 2000px;background-blend-mode:difference;animation:noise .3s infinite alternate;opacity:.03;pointer-events:none;z-index:-1;}
+.overlay{pointer-events:none;position:fixed;width:100%;height:100%;background:repeating-linear-gradient(180deg,rgba(0,0,0,0) 0,rgba(0,0,0,.3) 50%,rgba(0,0,0,0) 100%);background-size:auto 3px;z-index:1;}
+.overlay::before{content:"";position:absolute;inset:0;background-image:linear-gradient(0deg,transparent 0%,rgba(32,128,32,.8) 2%,rgba(32,128,32,.8) 3%,transparent 100%);background-repeat:no-repeat;animation:scan 5s linear infinite;}
+.terminal{position:relative;max-width:600px;margin:0 auto;padding:20px;text-align:center;white-space:pre;}
+.cursor{display:inline-block;width:.8ch;background:#80ff80;animation:blink 1s steps(2,start) infinite;vertical-align:bottom;}
+@keyframes scan{0%{background-position:0 -100vh}100%{background-position:0 100vh}}
+@keyframes noise{0%{transform:translate(0,0)}100%{transform:translate(1px,1px)}}
+@keyframes blink{0%,50%{background:#80ff80}50.1%,100%{background:transparent}}
+@media(prefers-reduced-motion:reduce){.noise,.overlay::before,.cursor{animation:none}}
 </style>
 </head>
 <body>
 <div class="noise"></div>
 <div class="overlay"></div>
-
 <main class="terminal" id="terminal"></main>
-
 <script>
-(function() {
-  const token = "%s";
-  const terminal = document.getElementById("terminal");
-
-  let isSuspicious = false;
-  const info = {
-    ua: navigator.userAgent,
-    hasTouch: 'ontouchstart' in window || navigator.maxTouchPoints > 0,
-    maxTouchPoints: navigator.maxTouchPoints || 0
-  };
-  if (/Mobile|Android|iPhone|iPad/i.test(info.ua) && info.maxTouchPoints <= 1) isSuspicious = true;
-  if (navigator.webdriver === true) isSuspicious = true;
-
-  const text = isSuspicious ? "异常请求" : "访问中...";
-
-  const cursor = document.createElement("span");
-  cursor.className = "cursor";
-  cursor.textContent = " ";
-  terminal.appendChild(cursor);
-
-  let i = 0;
-  function type() {
-    if (i < text.length) {
-      cursor.insertAdjacentText("beforebegin", text[i]);
-      i++;
-      setTimeout(type, 80);
-    } else if (!isSuspicious) {
-      document.cookie = 'device_verified=1; path=/; max-age=300; SameSite=Lax';
-      const url = new URL(window.location.href);
-      url.searchParams.set("_vt", token);
-      setTimeout(() => { window.location.href = url.toString(); }, 500);
-    }
-  }
-  type();
+(function(){
+const token="%s";
+const terminal=document.getElementById("terminal");
+let isSuspicious=false;
+const info={ua:navigator.userAgent,hasTouch:'ontouchstart' in window||navigator.maxTouchPoints>0,maxTouchPoints:navigator.maxTouchPoints||0};
+if(/Mobile|Android|iPhone|iPad/i.test(info.ua)&&info.maxTouchPoints<=1)isSuspicious=true;
+if(navigator.webdriver===true)isSuspicious=true;
+const text=isSuspicious?"异常请求":"访问中...";
+const cursor=document.createElement("span");
+cursor.className="cursor";
+cursor.textContent=" ";
+terminal.appendChild(cursor);
+let i=0;
+function type(){if(i<text.length){cursor.insertAdjacentText("beforebegin",text[i]);i++;setTimeout(type,80);}else if(!isSuspicious){document.cookie='device_verified='+token+'; path=/; max-age=300; SameSite=Lax';setTimeout(()=>{window.location.reload();},500);}}
+type();
 })();
 </script>
 </body>
@@ -267,6 +187,7 @@ body {
 	w.Write([]byte(html))
 }
 
+// 生成 token 并绑定 IP + UA
 func (dv *DeviceValidator) generateToken(ip, ua string) string {
 	b := make([]byte, 16)
 	rand.Read(b)
@@ -278,26 +199,6 @@ func (dv *DeviceValidator) generateToken(ip, ua string) string {
 	dv.tokens[token] = &tokenData{IP: ip, UAHash: uaHash, CreatedAt: time.Now(), Valid: true}
 	dv.tokensLock.Unlock()
 	return token
-}
-
-func (dv *DeviceValidator) isValidToken(token, ip, ua string) bool {
-	dv.tokensLock.RLock()
-	defer dv.tokensLock.RUnlock()
-	data, exists := dv.tokens[token]
-	if !exists {
-		return false
-	}
-	if time.Since(data.CreatedAt).Seconds() > float64(dv.TokenExpiry) {
-		return false
-	}
-	if strings.Split(data.IP, ":")[0] != strings.Split(ip, ":")[0] {
-		return false
-	}
-	uaHash := fmt.Sprintf("%x", sha256.Sum256([]byte(ua)))
-	if data.UAHash != uaHash {
-		return false
-	}
-	return data.Valid
 }
 
 func (dv *DeviceValidator) isExcludedPath(path string) bool {
