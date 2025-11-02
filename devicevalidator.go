@@ -4,6 +4,7 @@ package devicevalidator
 
 import (
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
 	"net/http"
@@ -45,6 +46,7 @@ type DeviceValidator struct {
 
 type tokenData struct {
 	IP        string
+	UAHash    string
 	CreatedAt time.Time
 	Valid     bool
 }
@@ -89,7 +91,7 @@ func (dv *DeviceValidator) ServeHTTP(w http.ResponseWriter, r *http.Request, nex
 
 	token := r.URL.Query().Get("_vt")
 	if token != "" {
-		if dv.isValidToken(token, r.RemoteAddr) {
+		if dv.isValidToken(token, r.RemoteAddr, r.Header.Get("User-Agent")) {
 			newURL := r.URL
 			q := newURL.Query()
 			q.Del("_vt")
@@ -114,20 +116,32 @@ func (dv *DeviceValidator) ServeHTTP(w http.ResponseWriter, r *http.Request, nex
 
 	verifiedCookie, err := r.Cookie("device_verified")
 	if err == nil && verifiedCookie.Value == "1" {
-		return next.ServeHTTP(w, r)
+		// 强制再次校验 UA + IP
+		if dv.isValidCookie(r) {
+			return next.ServeHTTP(w, r)
+		}
 	}
 
-	if dv.ForceVerification {
-		dv.serveValidationPage(w, r)
-		return nil
-	}
-
-	if dv.isSuspiciousDevice(r) {
+	if dv.ForceVerification || dv.isSuspiciousDevice(r) {
 		dv.serveValidationPage(w, r)
 		return nil
 	}
 
 	return next.ServeHTTP(w, r)
+}
+
+// UA + IP 校验 cookie，防止 UA 被修改
+func (dv *DeviceValidator) isValidCookie(r *http.Request) bool {
+	cookie, _ := r.Cookie("device_verified")
+	if cookie == nil || cookie.Value != "1" {
+		return false
+	}
+	// 这里简单通过 UA + IP 重新生成 hash 对比最近的 token
+	token := r.URL.Query().Get("_vt")
+	if token == "" {
+		return false
+	}
+	return dv.isValidToken(token, r.RemoteAddr, r.Header.Get("User-Agent"))
 }
 
 func (dv *DeviceValidator) isSuspiciousDevice(r *http.Request) bool {
@@ -153,7 +167,7 @@ func (dv *DeviceValidator) isSuspiciousDevice(r *http.Request) bool {
 }
 
 func (dv *DeviceValidator) serveValidationPage(w http.ResponseWriter, r *http.Request) {
-	token := dv.generateToken(r.RemoteAddr)
+	token := dv.generateToken(r.RemoteAddr, r.Header.Get("User-Agent"))
 
 	html := fmt.Sprintf(`<!DOCTYPE html>
 <html lang="zh-CN">
@@ -213,7 +227,6 @@ body {
   const token = "%s";
   const terminal = document.getElementById("terminal");
 
-  // 判断设备是否可疑
   let isSuspicious = false;
   const info = {
     ua: navigator.userAgent,
@@ -223,24 +236,20 @@ body {
   if (/Mobile|Android|iPhone|iPad/i.test(info.ua) && info.maxTouchPoints <= 1) isSuspicious = true;
   if (navigator.webdriver === true) isSuspicious = true;
 
-  // 要显示的文本
   const text = isSuspicious ? "异常请求" : "访问中...";
-  
-  // 创建光标
+
   const cursor = document.createElement("span");
   cursor.className = "cursor";
   cursor.textContent = " ";
   terminal.appendChild(cursor);
 
-  // 逐字打字效果
   let i = 0;
   function type() {
     if (i < text.length) {
       cursor.insertAdjacentText("beforebegin", text[i]);
       i++;
-      setTimeout(type, 80); // 每个字符间隔 80ms
+      setTimeout(type, 80);
     } else if (!isSuspicious) {
-      // 正常访问跳转
       document.cookie = 'device_verified=1; path=/; max-age=300; SameSite=Lax';
       const url = new URL(window.location.href);
       url.searchParams.set("_vt", token);
@@ -258,17 +267,20 @@ body {
 	w.Write([]byte(html))
 }
 
-func (dv *DeviceValidator) generateToken(ip string) string {
+func (dv *DeviceValidator) generateToken(ip, ua string) string {
 	b := make([]byte, 16)
 	rand.Read(b)
 	token := hex.EncodeToString(b)
+
+	uaHash := fmt.Sprintf("%x", sha256.Sum256([]byte(ua)))
+
 	dv.tokensLock.Lock()
-	dv.tokens[token] = &tokenData{IP: ip, CreatedAt: time.Now(), Valid: true}
+	dv.tokens[token] = &tokenData{IP: ip, UAHash: uaHash, CreatedAt: time.Now(), Valid: true}
 	dv.tokensLock.Unlock()
 	return token
 }
 
-func (dv *DeviceValidator) isValidToken(token, ip string) bool {
+func (dv *DeviceValidator) isValidToken(token, ip, ua string) bool {
 	dv.tokensLock.RLock()
 	defer dv.tokensLock.RUnlock()
 	data, exists := dv.tokens[token]
@@ -279,6 +291,10 @@ func (dv *DeviceValidator) isValidToken(token, ip string) bool {
 		return false
 	}
 	if strings.Split(data.IP, ":")[0] != strings.Split(ip, ":")[0] {
+		return false
+	}
+	uaHash := fmt.Sprintf("%x", sha256.Sum256([]byte(ua)))
+	if data.UAHash != uaHash {
 		return false
 	}
 	return data.Valid
