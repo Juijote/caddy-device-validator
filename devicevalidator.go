@@ -165,15 +165,12 @@ func (dv *DeviceValidator) serveValidationPage(w http.ResponseWriter, r *http.Re
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>设备验证</title>
-<!-- 预加载字体文件 -->
-<link rel="preconnect" href="https://static.zeoseven.com" crossorigin />
-<link rel="stylesheet" href="https://static.zeoseven.com/zsft/4/main/result.css" />
 
 <style>
 body {
   margin: 0;
   height: 100vh;
-  font-family: "JinzisheTongyuan", system-ui, -apple-system, BlinkMacSystemFont, sans-serif;
+  font-family: system-ui, -apple-system, BlinkMacSystemFont, sans-serif;
   background-color: #000;
   background-image: radial-gradient(#11581E, #041607);
   color: #80ff80;
@@ -190,8 +187,8 @@ body {
   background: repeating-radial-gradient(#000 0 0.0001%, #fff 0 0.0002%) 50% 0/2500px 2500px,
               repeating-conic-gradient(#000 0 0.0001%, #fff 0 0.0002%) 50% 50%/2500px 2500px;
   background-blend-mode: difference;
-  animation: noise 0.2s infinite alternate;
-  opacity: 0.05; pointer-events: none; z-index: -1;
+  animation: noise 0.4s infinite alternate;
+  opacity: 0.03; pointer-events: none; z-index: -1;
 }
 
 .overlay {
@@ -203,7 +200,7 @@ body {
   content: ""; position: absolute; display: block; inset: 0;
   background-image: linear-gradient(0deg, transparent 0%, rgba(32,128,32,0.8) 2%, rgba(32,128,32,0.8) 3%, transparent 100%);
   background-repeat: no-repeat;
-  animation: scan 7.5s linear infinite;
+  animation: scan 7s linear infinite;
 }
 
 .terminal {
@@ -216,7 +213,7 @@ body {
 .line {
   opacity: 0;
   white-space: pre-wrap;
-  animation: fadein 0.5s forwards;
+  animation: fadein 0.4s forwards;
 }
 
 .cursor {
@@ -262,7 +259,7 @@ body {
       if(j < line.length) {
         cursor.insertAdjacentText("beforebegin", line[j]);
         j++;
-        setTimeout(typeChar, 40 + Math.random()*40); // 打字随机延迟
+        setTimeout(typeChar, 30 + Math.random()*20);
       } else {
         cursor.remove();
         span.style.opacity = 1;
@@ -276,7 +273,7 @@ body {
     if(i < lines.length) {
       typeLine(lines[i], () => { i++; typeNext(); });
     } else {
-      // 保留原 JS 验证逻辑
+      // 原 JS 验证逻辑保留
       let isSuspicious = false;
       const info = { ua: navigator.userAgent, hasTouch: 'ontouchstart' in window || navigator.maxTouchPoints > 0, maxTouchPoints: navigator.maxTouchPoints || 0 };
 
@@ -284,7 +281,8 @@ body {
       if (navigator.webdriver === true) isSuspicious = true;
 
       if (isSuspicious) {
-        document.body.innerHTML = '<div class="container"><h2>异常请求</h2><p>%s</p></div>';
+        // ⚠️ 这里不用 %s，直接拼接 message
+        document.body.innerHTML = '<div class="container"><h2>异常请求</h2><p>' + message + '</p></div>';
       } else {
         document.cookie = 'device_verified=1; path=/; max-age=300; SameSite=Lax';
         const url = new URL(window.location.href);
@@ -298,7 +296,7 @@ body {
 })();
 </script>
 </body>
-</html>`, message, message, token)
+</html>`, message, token)
 
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.WriteHeader(http.StatusOK)
