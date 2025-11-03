@@ -1,4 +1,4 @@
-module github.com/Juijote/Caddy-Device-Validator
+module github.com/Juijote/caddy-device-validator
 
 go 1.21
 
