@@ -85,10 +85,40 @@ func (dv *DeviceValidator) ServeHTTP(w http.ResponseWriter, r *http.Request, nex
 		return next.ServeHTTP(w, r)
 	}
 
+	// 检查是否是验证回调请求
+	if r.URL.Query().Get("dv_verified") == "1" {
+		token := r.URL.Query().Get("token")
+		if token != "" && dv.isValidToken(token, r) {
+			// 设置 cookie 并重定向到原始 URL（去掉查询参数）
+			http.SetCookie(w, &http.Cookie{
+				Name:     "device_verified",
+				Value:    token,
+				Path:     "/",
+				MaxAge:   dv.TokenExpiry,
+				HttpOnly: true,
+				SameSite: http.SameSiteLaxMode,
+			})
+			
+			// 重定向到原始路径（去掉验证参数）
+			redirectURL := r.URL.Path
+			if r.URL.RawQuery != "" {
+				// 保留其他查询参数
+				query := r.URL.Query()
+				query.Del("dv_verified")
+				query.Del("token")
+				if len(query) > 0 {
+					redirectURL += "?" + query.Encode()
+				}
+			}
+			http.Redirect(w, r, redirectURL, http.StatusFound)
+			return nil
+		}
+	}
+
 	verifiedCookie, err := r.Cookie("device_verified")
 	if err == nil && verifiedCookie.Value != "" {
-		// cookie 存在，检查 UA/IP hash 是否匹配
-		if dv.isValidCookie(verifiedCookie.Value, r) {
+		// cookie 存在，检查是否有效
+		if dv.isValidToken(verifiedCookie.Value, r) {
 			return next.ServeHTTP(w, r)
 		}
 	}
@@ -101,10 +131,11 @@ func (dv *DeviceValidator) ServeHTTP(w http.ResponseWriter, r *http.Request, nex
 	return next.ServeHTTP(w, r)
 }
 
-func (dv *DeviceValidator) isValidCookie(cookieValue string, r *http.Request) bool {
+func (dv *DeviceValidator) isValidToken(token string, r *http.Request) bool {
 	dv.tokensLock.RLock()
 	defer dv.tokensLock.RUnlock()
-	data, exists := dv.tokens[cookieValue]
+	
+	data, exists := dv.tokens[token]
 	if !exists || !data.Valid {
 		return false
 	}
@@ -137,6 +168,14 @@ func (dv *DeviceValidator) isSuspiciousDevice(r *http.Request) bool {
 func (dv *DeviceValidator) serveValidationPage(w http.ResponseWriter, r *http.Request) {
 	token := dv.generateToken(r.RemoteAddr, r.Header.Get("User-Agent"))
 
+	// 构造验证后的回调 URL
+	callbackURL := r.URL.Path
+	if r.URL.RawQuery != "" {
+		callbackURL += "?" + r.URL.RawQuery + "&dv_verified=1&token=" + token
+	} else {
+		callbackURL += "?dv_verified=1&token=" + token
+	}
+
 	html := fmt.Sprintf(`<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
@@ -144,16 +183,15 @@ func (dv *DeviceValidator) serveValidationPage(w http.ResponseWriter, r *http.Re
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>设备验证</title>
 <style>
-/* CRT 风格样式保持不变 */
 body{margin:0;height:100vh;font-family:system-ui,-apple-system,BlinkMacSystemFont,sans-serif;background-color:#000;background-image:radial-gradient(#11581E,#041607);color:#80ff80;text-shadow:0 0 2px #33ff33,0 0 1px #33ff33;display:flex;align-items:center;justify-content:center;overflow:hidden;font-size:1.5rem;}
-.noise{position:fixed;top:0;left:0;width:100%;height:100%;background:repeating-radial-gradient(#000 0 0.0001%,#fff 0 0.0002%) 50% 0/2000px 2000px,repeating-conic-gradient(#000 0 0.0001%,#fff 0 0.0002%) 50% 50%/2000px 2000px;background-blend-mode:difference;animation:noise .3s infinite alternate;opacity:.03;pointer-events:none;z-index:-1;}
-.overlay{pointer-events:none;position:fixed;width:100%;height:100%;background:repeating-linear-gradient(180deg,rgba(0,0,0,0) 0,rgba(0,0,0,.3) 50%,rgba(0,0,0,0) 100%);background-size:auto 3px;z-index:1;}
-.overlay::before{content:"";position:absolute;inset:0;background-image:linear-gradient(0deg,transparent 0%,rgba(32,128,32,.8) 2%,rgba(32,128,32,.8) 3%,transparent 100%);background-repeat:no-repeat;animation:scan 5s linear infinite;}
+.noise{position:fixed;top:0;left:0;width:100%;height:100%;background:repeating-radial-gradient(#000 0 0.0001%%,#fff 0 0.0002%%) 50%% 0/2000px 2000px,repeating-conic-gradient(#000 0 0.0001%%,#fff 0 0.0002%%) 50%% 50%%/2000px 2000px;background-blend-mode:difference;animation:noise .3s infinite alternate;opacity:.03;pointer-events:none;z-index:-1;}
+.overlay{pointer-events:none;position:fixed;width:100%%;height:100%%;background:repeating-linear-gradient(180deg,rgba(0,0,0,0) 0,rgba(0,0,0,.3) 50%%,rgba(0,0,0,0) 100%%);background-size:auto 3px;z-index:1;}
+.overlay::before{content:"";position:absolute;inset:0;background-image:linear-gradient(0deg,transparent 0%%,rgba(32,128,32,.8) 2%%,rgba(32,128,32,.8) 3%%,transparent 100%%);background-repeat:no-repeat;animation:scan 5s linear infinite;}
 .terminal{position:relative;max-width:600px;margin:0 auto;padding:20px;text-align:center;white-space:pre;}
 .cursor{display:inline-block;width:.8ch;background:#80ff80;animation:blink 1s steps(2,start) infinite;vertical-align:bottom;}
-@keyframes scan{0%{background-position:0 -100vh}100%{background-position:0 100vh}}
-@keyframes noise{0%{transform:translate(0,0)}100%{transform:translate(1px,1px)}}
-@keyframes blink{0%,50%{background:#80ff80}50.1%,100%{background:transparent}}
+@keyframes scan{0%%{background-position:0 -100vh}100%%{background-position:0 100vh}}
+@keyframes noise{0%%{transform:translate(0,0)}100%%{transform:translate(1px,1px)}}
+@keyframes blink{0%%,50%%{background:#80ff80}50.1%%,100%%{background:transparent}}
 @media(prefers-reduced-motion:reduce){.noise,.overlay::before,.cursor{animation:none}}
 </style>
 </head>
@@ -163,7 +201,7 @@ body{margin:0;height:100vh;font-family:system-ui,-apple-system,BlinkMacSystemFon
 <main class="terminal" id="terminal"></main>
 <script>
 (function(){
-const token="%s";
+const callbackURL="%s";
 const terminal=document.getElementById("terminal");
 let isSuspicious=false;
 const info={ua:navigator.userAgent,hasTouch:'ontouchstart' in window||navigator.maxTouchPoints>0,maxTouchPoints:navigator.maxTouchPoints||0};
@@ -175,19 +213,18 @@ cursor.className="cursor";
 cursor.textContent=" ";
 terminal.appendChild(cursor);
 let i=0;
-function type(){if(i<text.length){cursor.insertAdjacentText("beforebegin",text[i]);i++;setTimeout(type,80);}else if(!isSuspicious){document.cookie='device_verified='+token+'; path=/; max-age=300; SameSite=Lax';setTimeout(()=>{window.location.reload();},500);}}
+function type(){if(i<text.length){cursor.insertAdjacentText("beforebegin",text[i]);i++;setTimeout(type,80);}else if(!isSuspicious){setTimeout(()=>{window.location.href=callbackURL;},500);}}
 type();
 })();
 </script>
 </body>
-</html>`, token)
+</html>`, callbackURL)
 
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.WriteHeader(http.StatusOK)
 	w.Write([]byte(html))
 }
 
-// 生成 token 并绑定 IP + UA
 func (dv *DeviceValidator) generateToken(ip, ua string) string {
 	b := make([]byte, 16)
 	rand.Read(b)
