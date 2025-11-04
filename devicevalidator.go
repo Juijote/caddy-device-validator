@@ -77,7 +77,7 @@ func (dv *DeviceValidatorHeader) ServeHTTP(w http.ResponseWriter, r *http.Reques
 	// ① UA 白名单检测
 	for _, keyword := range dv.AllowUASubstring {
 		if strings.Contains(strings.ToLower(userAgent), strings.ToLower(keyword)) {
-			r.Header.Set("X-Device-Is-Fake-Mobile", "true")
+			r.Header.Set("X-Device-Is-Fake-Mobile", "false")
 			dv.logger.Debug("allowed UA bypassed validation",
 				zap.String("ua", userAgent),
 				zap.String("keyword", keyword))
