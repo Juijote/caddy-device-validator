@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"regexp"
+	"strings"
 
 	"github.com/caddyserver/caddy/v2"
 	"github.com/caddyserver/caddy/v2/caddyconfig/caddyfile"
@@ -72,12 +73,41 @@ func (dv *DeviceValidatorHeader) ServeHTTP(w http.ResponseWriter, r *http.Reques
 		return next.ServeHTTP(w, r)
 	}
 
+	// 检查 Cookie 中的验证数据
+	cookie, err := r.Cookie("_dv_data")
+	if err == nil && cookie.Value != "" {
+		// 解析 Cookie: touchPoints|hasTouch
+		parts := strings.Split(cookie.Value, "|")
+		if len(parts) == 2 {
+			touchPoints := parts[0]
+			hasTouch := parts[1]
+			isFake := touchPoints == "0" || touchPoints == "1" || hasTouch == "false"
+
+			// 添加请求头
+			r.Header.Set("X-Device-Touch-Points", touchPoints)
+			r.Header.Set("X-Device-Has-Touch", hasTouch)
+			r.Header.Set("X-Device-Is-Fake-Mobile", fmt.Sprintf("%t", isFake))
+
+			return next.ServeHTTP(w, r)
+		}
+	}
+
 	// 检查是否是带验证数据的请求（从验证页面提交的）
 	touchPoints := r.Header.Get("X-Device-Touch-Points")
 	hasTouch := r.Header.Get("X-Device-Has-Touch")
 
 	if touchPoints != "" && hasTouch != "" {
-		// 已有验证数据，判断是否为伪造移动设备
+		// 设置 Cookie（Session Cookie，浏览器关闭后失效）
+		cookieValue := touchPoints + "|" + hasTouch
+		http.SetCookie(w, &http.Cookie{
+			Name:     "_dv_data",
+			Value:    cookieValue,
+			Path:     "/",
+			HttpOnly: true,
+			SameSite: http.SameSiteLaxMode,
+			Secure:   r.TLS != nil,
+		})
+
 		isFake := touchPoints == "0" || touchPoints == "1" || hasTouch == "false"
 		r.Header.Set("X-Device-Is-Fake-Mobile", fmt.Sprintf("%t", isFake))
 
@@ -102,7 +132,7 @@ func (dv *DeviceValidatorHeader) serveValidationPage(w http.ResponseWriter, r *h
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>设备验证</title>
+<title>访问</title>
 <style>
 body{margin:0;height:100vh;font-family:system-ui,-apple-system,BlinkMacSystemFont,sans-serif;background-color:#000;background-image:radial-gradient(#11581E,#041607);color:#80ff80;text-shadow:0 0 2px #33ff33,0 0 1px #33ff33;display:flex;align-items:center;justify-content:center;overflow:hidden;font-size:1.5rem;}
 .noise{position:fixed;top:0;left:0;width:100%;height:100%;background:repeating-radial-gradient(#000 0 0.0001%,#fff 0 0.0002%) 50% 0/2000px 2000px,repeating-conic-gradient(#000 0 0.0001%,#fff 0 0.0002%) 50% 50%/2000px 2000px;background-blend-mode:difference;animation:noise .3s infinite alternate;opacity:.03;pointer-events:none;z-index:-1;}
@@ -124,7 +154,7 @@ body{margin:0;height:100vh;font-family:system-ui,-apple-system,BlinkMacSystemFon
 (function(){
 const terminal=document.getElementById("terminal");
 const info={hasTouch:'ontouchstart' in window||navigator.maxTouchPoints>0,maxTouchPoints:navigator.maxTouchPoints||0};
-const text="设备验证中...";
+const text="访问验证中...";
 const cursor=document.createElement("span");
 cursor.className="cursor";
 cursor.textContent=" ";
